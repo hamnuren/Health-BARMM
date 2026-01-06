@@ -1,0 +1,7 @@
+{
+  "name": "Mindanao GeoInsight: BARMM Portal",
+  "description": "A high-performance geospatial prototype for visualizing regional data in Mindanao, Philippines, with specialized tools for the Bangsamoro Autonomous Region (BARMM). Features include bulk CSV/Excel upload, choropleth mapping, and AI-driven data analysis.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
