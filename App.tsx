@@ -15,33 +15,124 @@ import { CATEGORY_MAP } from './constants/mapConfig';
 import { toPng } from 'html-to-image';
 import { jsPDF } from 'jspdf';
 
-// Refined coordinates to perfectly encompass the full BARMM spread from Tawi-Tawi to Lanao del Sur
 const DEFAULT_VIEW = { center: [6.85, 122.2] as [number, number], zoom: 7.1 };
 
-// Centralized normalization for deduplication
-const getFacilityFingerprint = (p: GeoPoint): string => {
-  let n = p.name.toUpperCase().trim();
-  n = n.split(' - ')[0].trim();
-  // Remove project noise
-  n = n.replace(/CONSTRUCTION OF|REPAIR OF|NEW CONSTRUCTION|PHASE \d+|PHASE|ADMIN BLDG|ADMIN BUILDING|MOTORPOOL/g, '').trim();
-  // Standardize common types
-  if (n.includes('INTEGRATED PROVINCIAL HEALTH OFFICE')) n = 'IPHO';
-  if (n.includes('CITY HEALTH OFFICE')) n = 'CHO';
-  if (n.includes('RURAL HEALTH UNIT')) n = 'RHU';
-  if (n.includes('BARANGAY HEALTH STATION')) n = 'BHS';
-  
-  if (n.includes('HOSPITAL')) {
-    // Remove hierarchy keywords to find base facility identity
-    n = n.replace(/DISTRICT|MUNICIPAL|PROVINCIAL|MEMORIAL|LIPAE|CITY|REGIONAL/g, '');
-    n = n.replace(/\s+/g, ' ').trim();
-    if (!n.endsWith('HOSPITAL')) n += ' HOSPITAL';
-  }
-  
-  const mun = (p.municipality || p.data?.Municipality || 'UNKNOWN').toString().toUpperCase();
-  const prov = (p.data?.Province || p.data?.province || 'BARMM').toString().toUpperCase();
-  const cat = (p.category || 'OTHER').toString().toUpperCase();
+/** 
+ * Official MOH-BARMM Hospital Matrix (29 Logical Entities)
+ */
+const CANONICAL_HOSPITALS = [
+  // Basilan (3)
+  { name: "LAMITAN DISTRICT HOSPITAL", keywords: ["LAMITAN"], prov: "BASILAN" },
+  { name: "SUMISIP DISTRICT HOSPITAL", keywords: ["SUMISIP"], prov: "BASILAN" },
+  { name: "TIPO-TIPO MUNICIPAL HOSPITAL", keywords: ["TIPO-TIPO", "TIPO TIPO"], prov: "BASILAN" },
+  // Lanao del Sur (6)
+  { name: "BALINDONG MUNICIPAL HOSPITAL", keywords: ["BALINDONG"], prov: "LANAO" },
+  { name: "DR. SERAPIO B. MONTAÑER JR. AL HAJ MEMORIAL HOSPITAL", keywords: ["MONTAÑER", "MALABANG"], prov: "LANAO" },
+  { name: "TAMPARAN DISTRICT HOSPITAL", keywords: ["TAMPARAN"], prov: "LANAO" },
+  { name: "UNAYAN DISTRICT HOSPITAL", keywords: ["UNAYAN", "BINIDAYAN"], prov: "LANAO" },
+  { name: "WAO DISTRICT HOSPITAL", keywords: ["WAO"], prov: "LANAO" },
+  { name: "MARANTAO PROVINCIAL HOSPITAL", keywords: ["MARANTAO"], prov: "LANAO" },
+  // Maguindanao del Norte (3)
+  { name: "DATU ODIN SINSUAT DISTRICT HOSPITAL", keywords: ["ODIN SINSUAT", "DINAIG"], prov: "MAGUINDANAO" },
+  { name: "DATU BLAH SINSUAT DISTRICT HOSPITAL", keywords: ["BLAH SINSUAT", "UPI"], prov: "MAGUINDANAO" },
+  { name: "IRANUN DISTRICT HOSPITAL", keywords: ["IRANUN", "PARANG"], prov: "MAGUINDANAO" },
+  // Maguindanao del Sur (3)
+  { name: "MAGUINDANAO PROVINCIAL HOSPITAL", keywords: ["MAGUINDANAO PROVINCIAL", "SHARIFF AGUAK"], prov: "MAGUINDANAO" },
+  { name: "BULUAN DISTRICT HOSPITAL", keywords: ["BULUAN"], prov: "MAGUINDANAO" },
+  { name: "SOUTH UPI MUNICIPAL HOSPITAL", keywords: ["SOUTH UPI"], prov: "MAGUINDANAO" },
+  // Sulu (9)
+  { name: "SULU PROVINCIAL HOSPITAL", keywords: ["SULU PROVINCIAL", "JOLO"], prov: "SULU" },
+  { name: "LUUK DISTRICT HOSPITAL", keywords: ["LUUK"], prov: "SULU" },
+  { name: "PANAMAO DISTRICT HOSPITAL", keywords: ["PANAMAO"], prov: "SULU" },
+  { name: "PARANG DISTRICT HOSPITAL (SULU)", keywords: ["PARANG"], prov: "SULU" },
+  { name: "SIASI DISTRICT HOSPITAL", keywords: ["SIASI"], prov: "SULU" },
+  { name: "PANGUTARAN DISTRICT HOSPITAL", keywords: ["PANGUTARAN"], prov: "SULU" },
+  { name: "TAPUL MUNICIPAL HOSPITAL", keywords: ["TAPUL"], prov: "SULU" },
+  { name: "TONGKIL MUNICIPAL HOSPITAL", keywords: ["TONGKIL", "BANGUINGUI"], prov: "SULU" },
+  { name: "MAIMBUNG MUNICIPAL HOSPITAL", keywords: ["MAIMBUNG"], prov: "SULU" },
+  // Tawi-Tawi (5)
+  { name: "DATU HALUN SAKILAN MEMORIAL HOSPITAL", keywords: ["HALUN SAKILAN", "TAWI-TAWI PROVINCIAL"], prov: "TAWI-TAWI" },
+  { name: "LANGUYAN MUNICIPAL HOSPITAL", keywords: ["LANGUYAN"], prov: "TAWI-TAWI" },
+  { name: "MAPUN DISTRICT HOSPITAL", keywords: ["MAPUN", "CAGAYAN DE TAWI-TAWI"], prov: "TAWI-TAWI" },
+  { name: "TUAN LIGADDUNG LIPAE MEMORIAL HOSPITAL", keywords: ["TUAN LIGADDUNG", "SAPA-SAPA"], prov: "TAWI-TAWI" },
+  { name: "DATU ALAWADIN T. BANDON, SR. MUNICIPAL HOSPITAL", keywords: ["ALAWADIN", "SIBUTO", "BANDON"], prov: "TAWI-TAWI" }
+];
 
-  return `${n}|${cat}|${mun}|${prov}`;
+const NATIONAL_EXCLUSIONS = [
+  "AMAI PAKPAK", "BASILAN GENERAL", "COTABATO SANITARIUM", "COTABATO REGIONAL", 
+  "CRMC", "APMC", "CAMP SIONGCO", "DAVAO MEDICAL", "SOUTHERN PHILIPPINES", 
+  "ZAMBOANGA CITY", "PRIVATE", "MEDICAL CENTER"
+];
+
+/**
+ * Enhanced Resolver: Uses Name, Province, and Municipality to disambiguate.
+ */
+const resolveHospitalIdentity = (rawName: string, provHint?: string, munHint?: string): string | null => {
+  const n = rawName.toUpperCase();
+  const p = (provHint || '').toUpperCase();
+  const m = (munHint || '').toUpperCase();
+  
+  // 1. Strict Exclusion (National/Private)
+  if (NATIONAL_EXCLUSIONS.some(ex => n.includes(ex)) && !n.includes("SULU SANITARIUM")) return null;
+
+  // 2. Specialized Logic for "PARANG" Collision
+  if (n.includes("PARANG") || m.includes("PARANG")) {
+    if (p.includes("SULU")) return "PARANG DISTRICT HOSPITAL (SULU)";
+    if (p.includes("MAGUINDANAO")) return "IRANUN DISTRICT HOSPITAL";
+  }
+
+  // 3. Keyword + Province Matching
+  for (const entry of CANONICAL_HOSPITALS) {
+    const isProvMatch = !p || p.includes(entry.prov);
+    const hasKeyword = entry.keywords.some(k => n.includes(k.toUpperCase()) || m.includes(k.toUpperCase()));
+    
+    if (hasKeyword && isProvMatch) {
+      return entry.name;
+    }
+  }
+
+  // 4. Fallback: Relaxed Keyword Match (ignore province if keywords are strong/unique)
+  for (const entry of CANONICAL_HOSPITALS) {
+    if (entry.keywords.some(k => n.includes(k.toUpperCase()))) {
+      return entry.name;
+    }
+  }
+
+  return null;
+};
+
+export const cleanFacilityName = (name: string, category?: string, prov?: string, mun?: string): string => {
+  if (!name) return 'Unknown Facility';
+  const n = name.toUpperCase().trim();
+  const cat = (category || 'Other').toUpperCase();
+
+  if (cat.includes('HOSPITAL')) {
+    const resolved = resolveHospitalIdentity(n, prov, mun);
+    if (resolved) return resolved;
+  }
+
+  // Standard clean for BHS/RHU
+  let cleaned = n;
+  const delimiters = [' - ', ' – ', ' : ', ' FOR ', '(', '/'];
+  delimiters.forEach(d => { cleaned = cleaned.split(d)[0].trim(); });
+  const noise = [/CONSTRUCTION/g, /REPAIR/g, /NEW/g, /EQUIPPING/g, /PHASE \d+/g, /UPGRADE/g, /REHABILITATION/g, /BUILDING/g];
+  noise.forEach(pattern => { cleaned = cleaned.replace(pattern, '').trim(); });
+
+  return cleaned.replace(/\s+/g, ' ').trim();
+};
+
+const getNormalizedFacilityKey = (p: GeoPoint): string => {
+  const cat = (p.category || 'Other').toUpperCase().trim();
+  const prov = (p.data?.Province || p.data?.province || 'BARMM').toString().toUpperCase().trim();
+  const mun = (p.municipality || p.data?.Municipality || 'UNKNOWN').toString().toUpperCase().trim();
+  
+  const cleanName = cleanFacilityName(p.name, cat, prov, mun);
+  
+  if (cat.includes('HOSPITAL')) {
+    return `HOSPITAL|${cleanName}`;
+  }
+
+  return `${cleanName}|${cat}|${mun}|${prov}`;
 };
 
 const App: React.FC = () => {
@@ -56,6 +147,7 @@ const App: React.FC = () => {
   const [showProvinces, setShowProvinces] = useState(true);
   const [showLabels, setShowLabels] = useState(true);
   const [showBorders, setShowBorders] = useState(true);
+  const [showNameMarkers, setShowNameMarkers] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
@@ -93,75 +185,6 @@ const App: React.FC = () => {
       setSelectedCategories(availableCategories);
     }
   }, [availableCategories]);
-
-  const handleDataUpdate = async (data: GeoPoint[]) => {
-    setIsUploading(true);
-    try {
-      await savePointsToStorage(data);
-      setPoints(data);
-    } catch (error) {
-      console.error("Failed to save data:", error);
-    } finally {
-      setIsUploading(false);
-    }
-  };
-
-  const handleClear = async () => {
-    await clearStorage();
-    setPoints([]);
-    setSearchQuery('');
-    setSelectedPoint(null);
-    setHighlightedProvince(null);
-    setHighlightedMunicipality(null);
-    setHiddenProvinces(new Set());
-    setMapView(DEFAULT_VIEW);
-    setLastSnapUrl(null);
-  };
-
-  const handleResetView = () => {
-    setHighlightedProvince(null);
-    setHighlightedMunicipality(null);
-    setMapView(DEFAULT_VIEW);
-    setFitTrigger(prev => prev + 1);
-  };
-
-  const toggleProvinceVisibility = (name: string) => {
-    const upperName = name.toUpperCase();
-    setHiddenProvinces(prev => {
-      const next = new Set(prev);
-      if (next.has(upperName)) next.delete(upperName);
-      else next.add(upperName);
-      return next;
-    });
-  };
-
-  const toggleAllProvincesVisibility = (visible: boolean) => {
-    if (visible) {
-      setHiddenProvinces(new Set());
-    } else {
-      setHiddenProvinces(new Set(provincesInData.map(p => p.toUpperCase())));
-    }
-  };
-
-  const handleProvinceToggle = (prov: string | null) => {
-    if (highlightedProvince && prov && highlightedProvince.toUpperCase() === prov.toUpperCase()) {
-      setHighlightedProvince(null);
-      setHighlightedMunicipality(null);
-    } else {
-      setHighlightedProvince(prov);
-      setHighlightedMunicipality(null);
-      setFitTrigger(prev => prev + 1);
-    }
-  };
-
-  const handleMunicipalitySelect = (mun: string | null) => {
-    setHighlightedMunicipality(mun);
-    if (mun) setFitTrigger(prev => prev + 1);
-  };
-
-  const handleFitActive = () => {
-    setFitTrigger(prev => prev + 1);
-  };
 
   useEffect(() => {
     const loadInitialData = async () => {
@@ -201,248 +224,185 @@ const App: React.FC = () => {
     loadInitialData();
   }, []);
 
-  const filteredPoints = useMemo(() => {
+  const isValidBARMMFacility = (p: GeoPoint): boolean => {
+    const cat = (p.category || 'Other').toUpperCase();
+    if (cat.includes('HOSPITAL')) {
+      const prov = (p.data?.Province || p.data?.province || '').toString();
+      const mun = (p.municipality || p.data?.Municipality || '').toString();
+      return resolveHospitalIdentity(p.name, prov, mun) !== null;
+    }
+    return true;
+  };
+
+  const clusteredPoints = useMemo(() => {
     const query = searchQuery.toLowerCase().trim();
-    return points.filter(p => {
+    const clusters: Record<string, GeoPoint> = {};
+
+    points.forEach(p => {
+      if (!isValidBARMMFacility(p)) return;
+
       const pProv = (p.data?.Province || p.data?.province || 'Unknown').toString();
       const pMun = (p.municipality || p.data?.Municipality || '').toString();
 
       if (highlightedProvince) {
-        const upperPProv = pProv.toUpperCase();
-        const upperHProv = highlightedProvince.toUpperCase();
-        const matchesProvince = upperPProv.includes(upperHProv) || upperHProv.includes(upperPProv) || isPointInProvince(p.lat, p.lng, highlightedProvince);
-        if (!matchesProvince) return false;
+        if (!pProv.toUpperCase().includes(highlightedProvince.toUpperCase()) && 
+            !isPointInProvince(p.lat, p.lng, highlightedProvince)) return;
       }
-
-      if (highlightedMunicipality) {
-        if (pMun.toUpperCase() !== highlightedMunicipality.toUpperCase()) return false;
-      }
-
-      if (hiddenProvinces.has(pProv.toUpperCase())) return false;
+      if (highlightedMunicipality && pMun.toUpperCase() !== highlightedMunicipality.toUpperCase()) return;
+      if (hiddenProvinces.has(pProv.toUpperCase())) return;
       
       const cat = p.category || 'Other';
-      if (!selectedCategories.includes(cat)) return false;
+      if (!selectedCategories.includes(cat)) return;
+      if (query && !p.name.toLowerCase().includes(query) && !pMun.toLowerCase().includes(query)) return;
 
-      return !query || p.name.toLowerCase().includes(query) || pMun.toLowerCase().includes(query);
+      const identityKey = getNormalizedFacilityKey(p);
+      
+      if (!clusters[identityKey]) {
+        clusters[identityKey] = { 
+          ...p, 
+          name: cleanFacilityName(p.name, p.category, pProv, pMun), 
+          facilities: [p] 
+        };
+      } else {
+        clusters[identityKey].facilities?.push(p);
+      }
     });
+
+    return Object.values(clusters);
   }, [points, selectedCategories, searchQuery, highlightedProvince, highlightedMunicipality, hiddenProvinces]);
-
-  const denominators = useMemo(() => {
-    if (highlightedProvince) {
-      const ref = BARMM_PROVINCES.find(p => 
-        p.name.toUpperCase().includes(highlightedProvince.toUpperCase()) ||
-        highlightedProvince.toUpperCase().includes(p.name.toUpperCase())
-      );
-      if (ref) return { muns: ref.totalMunicipalities, brgys: ref.totalBarangays };
-    }
-
-    const activeProvinces = provincesInData.filter(p => !hiddenProvinces.has(p.toUpperCase()));
-    let totalMuns = 0;
-    let totalBrgys = 0;
-
-    activeProvinces.forEach(provName => {
-        const ref = BARMM_PROVINCES.find(p => 
-            p.name.toUpperCase().includes(provName.toUpperCase()) ||
-            provName.toUpperCase().includes(p.name.toUpperCase())
-        );
-        if (ref) {
-            totalMuns += ref.totalMunicipalities;
-            totalBrgys += ref.totalBarangays;
-        }
-    });
-
-    if (totalMuns > 0) return { muns: totalMuns, brgys: totalBrgys };
-
-    const muns = new Set();
-    const brgys = new Set();
-    points.forEach(p => {
-      const mun = (p.municipality || p.data?.Municipality || 'Unknown').toString();
-      const brgy = (p.data?.['Brgy/ Sitio'] || p.data?.Barangay || 'Unknown').toString();
-      muns.add(mun);
-      brgys.add(brgy);
-    });
-    return { muns: muns.size || 1, brgys: brgys.size || 1 };
-  }, [points, highlightedProvince, hiddenProvinces, provincesInData]);
 
   const categoryTotals = useMemo(() => {
     const totals: Record<string, number> = {};
     const seenFacilities = new Set<string>();
 
-    filteredPoints.forEach(p => {
-      const cat = p.category || 'Other';
-      const fingerprint = getFacilityFingerprint(p);
+    points.forEach(p => {
+      if (!isValidBARMMFacility(p)) return;
+
+      const pProv = (p.data?.Province || p.data?.province || 'Unknown').toString();
+      const pMun = (p.municipality || p.data?.Municipality || 'UNKNOWN').toString();
       
-      if (!seenFacilities.has(fingerprint)) {
-        seenFacilities.add(fingerprint);
+      if (highlightedProvince && !pProv.toUpperCase().includes(highlightedProvince.toUpperCase()) && !isPointInProvince(p.lat, p.lng, highlightedProvince)) return;
+      if (highlightedMunicipality && pMun.toUpperCase() !== highlightedMunicipality.toUpperCase()) return;
+      if (hiddenProvinces.has(pProv.toUpperCase())) return;
+
+      const cat = p.category || 'Other';
+      const identityKey = getNormalizedFacilityKey(p);
+      
+      if (!seenFacilities.has(identityKey)) {
+        seenFacilities.add(identityKey);
         totals[cat] = (totals[cat] || 0) + 1;
       }
     });
     return totals;
-  }, [filteredPoints]);
+  }, [points, highlightedProvince, highlightedMunicipality, hiddenProvinces]);
+
+  const denominators = useMemo(() => {
+    if (highlightedProvince) {
+      const ref = BARMM_PROVINCES.find(p => p.name.toUpperCase().includes(highlightedProvince.toUpperCase()));
+      if (ref) return { muns: ref.totalMunicipalities, brgys: ref.totalBarangays };
+    }
+    const activeProvinces = provincesInData.filter(p => !hiddenProvinces.has(p.toUpperCase()));
+    let totalMuns = 0, totalBrgys = 0;
+    activeProvinces.forEach(provName => {
+        const ref = BARMM_PROVINCES.find(p => p.name.toUpperCase().includes(provName.toUpperCase()));
+        if (ref) { totalMuns += ref.totalMunicipalities; totalBrgys += ref.totalBarangays; }
+    });
+    return totalMuns > 0 ? { muns: totalMuns, brgys: totalBrgys } : { muns: 1, brgys: 1 };
+  }, [points, highlightedProvince, hiddenProvinces, provincesInData]);
 
   const triggerCapture = async (rect?: { x: number, y: number, width: number, height: number }, format: 'png' | 'pdf' | 'url' = 'png') => {
     if (isCapturing) return;
     setIsCapturing(true);
-    setIsSnipping(false);
-    
     const root = document.getElementById('root');
-    if (!root) {
-      setIsCapturing(false);
-      return;
-    }
-
+    if (!root) { setIsCapturing(false); return; }
     try {
       await new Promise(r => setTimeout(r, 100));
       const pixelRatio = format === 'url' ? 1.5 : 3;
-      
-      const options: any = {
-        pixelRatio,
-        quality: 1,
-        filter: (node: HTMLElement) => {
-            if (node.classList?.contains('exclude-from-screenshot')) return false;
-            return true;
-        },
-      };
-
-      if (rect) {
-        options.width = rect.width;
-        options.height = rect.height;
-        options.left = rect.x;
-        options.top = rect.y;
-      }
-
+      const options: any = { pixelRatio, quality: 1, filter: (node: HTMLElement) => !node.classList?.contains('exclude-from-screenshot') };
+      if (rect) { options.width = rect.width; options.height = rect.height; options.left = rect.x; options.top = rect.y; }
       const dataUrl = await toPng(root, options);
-      
-      if (format === 'url') {
-        setLastSnapUrl(dataUrl);
-        setIsCapturing(false);
-        return dataUrl;
-      }
-
+      if (format === 'url') { setLastSnapUrl(dataUrl); setIsCapturing(false); return dataUrl; }
       setShowFlash(true);
       setTimeout(() => setShowFlash(false), 400);
-
-      const timestamp = new Date().toISOString().split('T')[0];
-      const filename = `MindanaoGeo-Insight-${timestamp}`;
-
-      if (format === 'png') {
-        const link = document.createElement('a');
-        link.download = `${filename}.png`;
-        link.href = dataUrl;
-      } else {
-        const pdf = new jsPDF({
-          orientation: root.clientWidth > root.clientHeight ? 'landscape' : 'portrait',
-          unit: 'px',
-          format: rect ? [rect.width, rect.height] : [root.clientWidth, root.clientHeight]
-        });
-        pdf.addImage(dataUrl, 'PNG', 0, 0, rect ? rect.width : root.clientWidth, rect ? rect.height : root.clientHeight, undefined, 'FAST');
-        pdf.save(`${filename}.pdf`);
+      const filename = `BARMM-Intelligence-${new Date().toISOString().split('T')[0]}`;
+      if (format === 'png') { 
+        const link = document.createElement('a'); link.download = `${filename}.png`; link.href = dataUrl; document.body.appendChild(link); link.click(); document.body.removeChild(link); 
+      } else { 
+        const pdf = new jsPDF({ orientation: root.clientWidth > root.clientHeight ? 'landscape' : 'portrait', unit: 'px', format: rect ? [rect.width, rect.height] : [root.clientWidth, root.clientHeight] }); 
+        pdf.addImage(dataUrl, 'PNG', 0, 0, rect ? rect.width : root.clientWidth, rect ? rect.height : root.clientHeight, undefined, 'FAST'); 
+        pdf.save(`${filename}.pdf`); 
       }
-    } catch (err) {
-      console.error(err);
-      alert('Capture failed.');
-    } finally {
-      setIsCapturing(false);
-    }
-  };
-
-  const handleSearchFocus = (lat: number, lng: number) => {
-    if (Number.isFinite(lat) && Number.isFinite(lng)) {
-      setMapView({ center: [lat, lng], zoom: 14 });
-    }
+    } catch (err) { alert('Capture failed.'); } finally { setIsCapturing(false); }
   };
 
   return (
     <div className={`relative h-screen w-full bg-slate-100 overflow-hidden font-sans ${isSidebarExpanded ? 'sidebar-expanded' : ''}`}>
       {showFlash && <div className="flash-effect" />}
-      
       <div className="absolute inset-0 z-0">
         <MapComponent 
-          center={mapView.center} zoom={mapView.zoom} points={filteredPoints}
+          center={mapView.center} zoom={mapView.zoom} points={clusteredPoints}
           highlightedProvince={highlightedProvince}
           highlightedMunicipality={highlightedMunicipality}
           showMarkers={showMarkers} showProvinces={showProvinces}
           showLabels={showLabels} showBorders={showBorders}
+          showNameMarkers={showNameMarkers}
           onMarkerDoubleClick={(p) => setSelectedPoint(p)}
-          onProvinceSelect={handleProvinceToggle}
-          onResetView={handleResetView}
-          baseLayer={baseLayer}
-          setBaseLayer={setBaseLayer}
-          categoryTotals={categoryTotals}
-          fitTrigger={fitTrigger}
-          denominators={denominators}
+          onProvinceSelect={(p) => { setHighlightedProvince(p); setHighlightedMunicipality(null); setFitTrigger(v => v + 1); }}
+          onResetView={() => { setHighlightedProvince(null); setHighlightedMunicipality(null); setMapView(DEFAULT_VIEW); setFitTrigger(v => v + 1); }}
+          baseLayer={baseLayer} setBaseLayer={setBaseLayer}
+          categoryTotals={categoryTotals} fitTrigger={fitTrigger} denominators={denominators}
         />
       </div>
-
       {!isSnipping && (
         <>
           <AppNavigation 
-            activeTab={activeTab}
-            setActiveTab={setActiveTab}
-            onDataUpload={handleDataUpdate}
-            onClear={handleClear}
-            onSearch={handleSearchFocus}
-            onProvinceSelect={handleProvinceToggle}
-            onMunicipalitySelect={handleMunicipalitySelect}
-            points={points}
-            highlightedProvince={highlightedProvince}
-            highlightedMunicipality={highlightedMunicipality}
+            activeTab={activeTab} setActiveTab={setActiveTab}
+            onDataUpload={async (data) => { setIsUploading(true); await savePointsToStorage(data); setPoints(data); setIsUploading(false); }}
+            onClear={async () => { await clearStorage(); setPoints([]); setHighlightedProvince(null); setMapView(DEFAULT_VIEW); }}
+            onSearch={(lat, lng) => setMapView({ center: [lat, lng], zoom: 14 })}
+            onProvinceSelect={(p) => { setHighlightedProvince(p); setHighlightedMunicipality(null); setFitTrigger(v => v + 1); }}
+            onMunicipalitySelect={(m) => { setHighlightedMunicipality(m); setFitTrigger(v => v + 1); }}
+            points={points} highlightedProvince={highlightedProvince} highlightedMunicipality={highlightedMunicipality}
             showMarkers={showMarkers} setShowMarkers={setShowMarkers}
             showProvinces={showProvinces} setShowProvinces={setShowProvinces}
             showLabels={showLabels} setShowLabels={setShowLabels}
             showBorders={showBorders} setShowBorders={setShowBorders}
+            showNameMarkers={showNameMarkers} setShowNameMarkers={setShowNameMarkers}
             availableCategories={availableCategories}
             selectedCategories={selectedCategories} setSelectedCategories={setSelectedCategories}
             searchQuery={searchQuery} setSearchQuery={setSearchQuery}
             baseLayer={baseLayer} setBaseLayer={setBaseLayer}
             hiddenProvinces={hiddenProvinces}
-            onToggleProvince={toggleProvinceVisibility}
-            onToggleAllProvinces={toggleAllProvincesVisibility}
-            onFitActive={handleFitActive}
+            onToggleProvince={(n) => setHiddenProvinces(p => { const next = new Set(p); if (next.has(n.toUpperCase())) next.delete(n.toUpperCase()); else next.add(n.toUpperCase()); return next; })}
+            onToggleAllProvinces={(v) => setHiddenProvinces(v ? new Set() : new Set(provincesInData.map(p => p.toUpperCase())))}
+            onFitActive={() => setFitTrigger(v => v + 1)}
             provincesInData={provincesInData}
             onStartSnip={() => setIsSnipping(true)}
-            onCaptureFull={(format) => triggerCapture(undefined, format)}
-            isCapturing={isCapturing}
-            lastSnapUrl={lastSnapUrl}
-            onGenerateSnap={() => triggerCapture(undefined, 'url')}
-            denominators={denominators}
-            categoryTotals={categoryTotals}
+            onCaptureFull={(f) => triggerCapture(undefined, f)}
+            isCapturing={isCapturing} lastSnapUrl={lastSnapUrl} onGenerateSnap={() => triggerCapture(undefined, 'url')}
+            denominators={denominators} categoryTotals={categoryTotals}
           />
-
           <ProvinceViewControl 
-            provinces={provincesInData}
-            hiddenProvinces={hiddenProvinces}
-            onToggle={toggleProvinceVisibility}
-            onToggleAll={toggleAllProvincesVisibility}
-            onFocusProvince={handleProvinceToggle}
+            provinces={provincesInData} hiddenProvinces={hiddenProvinces}
+            onToggle={(n) => setHiddenProvinces(p => { const next = new Set(p); if (next.has(n.toUpperCase())) next.delete(n.toUpperCase()); else next.add(n.toUpperCase()); return next; })}
+            onFocusProvince={(n) => { setHighlightedProvince(n); setHighlightedMunicipality(null); setFitTrigger(v => v + 1); }}
             highlightedProvince={highlightedProvince}
           />
         </>
       )}
-
-      {isSnipping && (
-        <SnippingOverlay 
-          onCapture={(rect) => triggerCapture(rect, 'png')} 
-          onCancel={() => setIsSnipping(false)} 
-        />
-      )}
-
+      {isSnipping && <SnippingOverlay onCapture={(r) => triggerCapture(r, 'png')} onCancel={() => setIsSnipping(false)} />}
       {selectedPoint && !isSnipping && (
-        <div className="absolute right-6 top-6 bottom-6 w-full max-w-[400px] z-[60] animate-in slide-in-from-right duration-500 exclude-from-screenshot">
+        <div className="absolute right-6 top-6 bottom-6 w-full max-w-[420px] z-[60] animate-in slide-in-from-right duration-500 exclude-from-screenshot">
           <div className="h-full bg-white border border-slate-200 shadow-2xl rounded-[32px] overflow-hidden">
             <DetailSidebar point={selectedPoint} onClose={() => setSelectedPoint(null)} />
           </div>
         </div>
       )}
-
       {isUploading && (
         <div className="absolute inset-0 z-[100] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center exclude-from-screenshot">
           <div className="bg-white p-8 rounded-[32px] shadow-2xl flex flex-col items-center gap-4 animate-in zoom-in-95">
             <Activity className="text-indigo-600 animate-pulse" size={40} />
-            <div className="text-center">
-              <h3 className="text-base font-black text-slate-900 uppercase tracking-widest">Processing Intelligence</h3>
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Updating Regional Datasets</p>
-            </div>
+            <div className="text-center"><h3 className="text-base font-black text-slate-900 uppercase tracking-widest">Processing Matrix</h3></div>
           </div>
         </div>
       )}

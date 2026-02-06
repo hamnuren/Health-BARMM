@@ -1,3 +1,4 @@
+
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import L from 'leaflet';
 import { GeoPoint, BaseLayerType } from '../types';
@@ -16,6 +17,7 @@ interface MapComponentProps {
   showProvinces?: boolean;
   showLabels?: boolean;
   showBorders?: boolean;
+  showNameMarkers?: boolean;
   onMarkerDoubleClick?: (point: GeoPoint) => void;
   onProvinceSelect?: (name: string | null) => void;
   onResetView?: () => void;
@@ -43,7 +45,7 @@ const DEFAULT_LEGEND_POS = { bottom: 40, right: 16 };
 
 const MapComponent: React.FC<MapComponentProps> = ({ 
   center, zoom, points, highlightedProvince, highlightedMunicipality,
-  showMarkers = true, showProvinces = true, showLabels = true, showBorders = true, onMarkerDoubleClick,
+  showMarkers = true, showProvinces = true, showLabels = true, showBorders = true, showNameMarkers = false, onMarkerDoubleClick,
   onProvinceSelect, onResetView, baseLayer = 'standard', setBaseLayer, categoryTotals = {}, fitTrigger = 0,
   denominators = { muns: 0, brgys: 0 }
 }) => {
@@ -158,7 +160,7 @@ const MapComponent: React.FC<MapComponentProps> = ({
       mapRef.current = L.map(mapContainerRef.current, { 
         zoomControl: false, 
         attributionControl: false, 
-        preferCanvas: true,
+        preferCanvas: false,
         wheelDebounceTime: 40,
         wheelPxPerZoomLevel: 120
       }).setView(startCenter, zoom);
@@ -331,6 +333,9 @@ const MapComponent: React.FC<MapComponentProps> = ({
         const config = CATEGORY_MAP[point.category || 'Other'] || CATEGORY_MAP['Other'];
         const isCritical = point.category === 'Hospital';
         const markerSize = isCritical ? 16 : 12;
+
+        const isHighlightedMun = highlightedMunicipality && 
+          (point.municipality || point.data?.Municipality || '').toString().toUpperCase() === highlightedMunicipality.toUpperCase();
         
         const icon = L.divIcon({
           className: 'custom-marker-container',
@@ -350,7 +355,16 @@ const MapComponent: React.FC<MapComponentProps> = ({
           .on('dblclick', () => onMarkerDoubleClick?.(point))
           .addTo(mapRef.current!);
 
-        marker.bindTooltip(`
+        // UPDATED TOOLTIP LOGIC: Micro-labels for permanent view to prevent collisions
+        // The permanent state is controlled by either showNameMarkers (Global) or isHighlightedMun (Local)
+        const isPermanent = !!showNameMarkers || !!isHighlightedMun;
+        const tooltipHtml = isPermanent ? `
+          <div class="micro-label-wrapper">
+            <div class="text-[6.5px] font-black text-slate-800 uppercase tracking-tighter truncate max-w-[70px]">
+              ${point.name}
+            </div>
+          </div>
+        ` : `
           <div class="flex items-center gap-3 p-1 min-w-[140px]">
             <div class="w-8 h-8 rounded-lg bg-slate-100 flex-shrink-0 overflow-hidden">
                <img src="https://picsum.photos/seed/${point.id}/100/100" class="w-full h-full object-cover" />
@@ -360,12 +374,22 @@ const MapComponent: React.FC<MapComponentProps> = ({
               <div class="text-[10px] font-black text-slate-800 leading-tight">${point.name}</div>
             </div>
           </div>
-        `, { direction: 'top', offset: [0, -markerSize / 2], className: 'studio-glass-tooltip border-none shadow-2xl rounded-xl p-2' });
+        `;
+
+        const tooltipOptions: L.TooltipOptions = {
+          direction: 'top', 
+          offset: [0, -markerSize / 2], 
+          className: `studio-glass-tooltip border-none shadow-2xl rounded-xl ${isPermanent ? 'micro-label-mode' : ''}`,
+          permanent: isPermanent, 
+          sticky: !isPermanent
+        };
+
+        marker.bindTooltip(tooltipHtml, tooltipOptions);
         
         markersRef.current[point.id] = marker;
       });
     }
-  }, [points, showMarkers, onMarkerDoubleClick]);
+  }, [points, showMarkers, onMarkerDoubleClick, highlightedMunicipality, showNameMarkers]);
 
   const isDarkStyle = baseLayer === 'dark' || baseLayer === 'satellite' || baseLayer === 'hybrid';
 
@@ -406,7 +430,6 @@ const MapComponent: React.FC<MapComponentProps> = ({
     <div className="w-full h-full relative group">
       <div ref={mapContainerRef} className="w-full h-full relative z-0" style={{ background: '#f1f5f9' }} />
       
-      {/* INTERACTIVE DRAGGABLE LEGEND */}
       <div 
         onMouseDown={handleLegendMouseDown}
         onDoubleClick={resetLegendPosition}
@@ -429,7 +452,6 @@ const MapComponent: React.FC<MapComponentProps> = ({
             let displayLabel = name;
             let tooltipStr = `${count} total facilities`;
             
-            // Format BHS and RHU with selection-aware denominators and explicit phrasing
             if (name === 'BHS') {
               displayLabel = 'BHS';
               displayCountStr = `${count} / ${denominators.brgys}`;
@@ -455,7 +477,6 @@ const MapComponent: React.FC<MapComponentProps> = ({
         </div>
       </div>
 
-      {/* FOOTER WITH INTEGRATED ZOOM AND MAP STYLE */}
       <div className="absolute bottom-0 left-0 right-0 z-[1001] h-[22px] bg-white/90 backdrop-blur-sm border-t border-slate-300 flex items-center justify-between px-2 text-[10px] text-slate-700 font-sans pointer-events-auto select-none">
         <div className="flex items-center gap-4 overflow-hidden whitespace-nowrap">
           <div className="flex items-center gap-2">
@@ -472,13 +493,12 @@ const MapComponent: React.FC<MapComponentProps> = ({
         </div>
         
         <div className="flex items-center gap-5">
-          {/* MAP VIEW SELECTOR */}
           <div className="flex items-center gap-0.5 border-r border-slate-200 pr-4 h-[18px]">
             {mapStyles.map((style) => (
               <button
                 key={style.id}
                 onClick={() => setBaseLayer?.(style.id)}
-                className={`flex items-center gap-1 px-1.5 h-full rounded transition-all duration-200 hover:bg-slate-200 ${baseLayer === style.id ? 'bg-indigo-600 text-white font-black' : 'text-slate-500'}`}
+                className={`flex items-center gap-1 px-1.5 h-full rounded transition-all duration-200 hover:bg-slate-100 ${baseLayer === style.id ? 'bg-indigo-600 text-white font-black' : 'text-slate-600'}`}
                 title={style.label}
               >
                 <style.icon size={10} />
@@ -487,39 +507,16 @@ const MapComponent: React.FC<MapComponentProps> = ({
             ))}
           </div>
 
-          {/* INTEGRATED ZOOM & SCOPE BAR */}
           <div className="flex items-center bg-slate-100/60 rounded border border-slate-200 overflow-hidden h-[18px]">
-            <button 
-              onClick={onResetView}
-              className="px-2 h-full hover:bg-slate-200 hover:text-indigo-600 transition-colors flex items-center justify-center border-r border-slate-200"
-              title="Regional Scope (BARMM)"
-            >
-              <Target size={10} strokeWidth={3} />
-            </button>
-            <button 
-              onClick={handleZoomOut}
-              className="px-2 h-full hover:bg-slate-200 hover:text-indigo-600 transition-colors flex items-center justify-center border-r border-slate-200"
-              title="Zoom Out"
-            >
-              <Minus size={10} strokeWidth={3} />
-            </button>
-            <button 
-              onClick={handleZoomIn}
-              className="px-2 h-full hover:bg-slate-200 hover:text-indigo-600 transition-colors flex items-center justify-center"
-              title="Zoom In"
-            >
-              <Plus size={10} strokeWidth={3} />
-            </button>
+            <button onClick={onResetView} className="px-2 h-full hover:bg-slate-200 flex items-center justify-center border-r border-slate-200"><Target size={10} strokeWidth={3} /></button>
+            <button onClick={handleZoomOut} className="px-2 h-full hover:bg-slate-200 flex items-center justify-center border-r border-slate-200"><Minus size={10} strokeWidth={3} /></button>
+            <button onClick={handleZoomIn} className="px-2 h-full hover:bg-slate-200 flex items-center justify-center"><Plus size={10} strokeWidth={3} /></button>
           </div>
 
-          {/* DISTANCE METER */}
           <div className="flex items-center gap-2 pr-1 h-[18px]">
             <span className="font-bold text-slate-900 text-[9px]">{scaleLabel}</span>
             <div className="relative h-full flex items-center">
-              <div 
-                className="border-x border-b border-slate-900 h-[4px] transition-all duration-300 ease-out"
-                style={{ width: `${scaleWidth}px` }}
-              ></div>
+              <div className="border-x border-b border-slate-900 h-[4px] transition-all duration-300 ease-out" style={{ width: `${scaleWidth}px` }}></div>
             </div>
           </div>
         </div>
@@ -527,10 +524,22 @@ const MapComponent: React.FC<MapComponentProps> = ({
 
       <style>{`
         .studio-glass-tooltip {
-          background: rgba(255, 255, 255, 0.9) !important;
+          background: rgba(255, 255, 255, 0.85) !important;
           backdrop-filter: blur(8px) !important;
-          border: 1px solid rgba(255, 255, 255, 0.2) !important;
-          box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1) !important;
+          border: 1px solid rgba(255, 255, 255, 0.3) !important;
+          box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1) !important;
+          pointer-events: none;
+        }
+        .micro-label-mode {
+          padding: 0 !important;
+          border-radius: 2px !important;
+          min-width: 0 !important;
+          background: rgba(255, 255, 255, 0.7) !important;
+          border: 1px solid rgba(0, 0, 0, 0.1) !important;
+        }
+        .micro-label-wrapper {
+          padding: 1px 3px;
+          line-height: 1;
         }
         .province-polygon {
           transition: fill-opacity 0.4s ease, stroke-width 0.4s ease, color 0.4s ease, opacity 0.4s ease;
@@ -538,6 +547,9 @@ const MapComponent: React.FC<MapComponentProps> = ({
         .custom-marker-container:hover {
           transform: scale(1.3);
           z-index: 5000;
+        }
+        .leaflet-tooltip-pane .leaflet-tooltip.studio-glass-tooltip {
+          z-index: 1000;
         }
       `}</style>
     </div>

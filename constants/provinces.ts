@@ -50,9 +50,9 @@ export const BARMM_PROVINCES: ProvinceZone[] = [
     name: "Basilan",
     psgc: "1900700000",
     color: "#0284c7",
-    description: "The island province.",
-    totalMunicipalities: 13,
-    totalBarangays: 255,
+    description: "The island province (BARMM jurisdiction). Excludes Isabela City.",
+    totalMunicipalities: 12, // 11 Municipalities + 1 Component City (Lamitan)
+    totalBarangays: 210, // 255 total island barangays - 45 Isabela City barangays
     polygons: [[[6.42, 122.05], [7.02, 122.12], [6.50, 122.35], [6.42, 122.05]]]
   },
   {

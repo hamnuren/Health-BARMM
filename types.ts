@@ -9,8 +9,10 @@ export interface GeoPoint {
   value?: number;
   category?: string;
   imageUrl?: string;
+  // Support for multiple facilities at one coordinate
+  facilities?: GeoPoint[];
   // Dynamic properties from uploaded files
-  data?: Record<string, number | string>;
+  data?: Record<string, any>;
 }
 
 export type BaseLayerType = 'standard' | 'satellite' | 'hybrid' | 'dark';

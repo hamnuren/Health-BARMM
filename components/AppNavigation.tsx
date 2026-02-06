@@ -7,34 +7,34 @@ import {
   Network, Landmark, Activity, X, Scissors, Crosshair, Target, Maximize2,
   CheckCircle2, AlertCircle, AlertTriangle, Eye, EyeOff, Maximize, Map as MapIcon,
   ListFilter, RotateCcw, Box, LibraryBig, ArrowLeft, Coins, Settings2, Layers2,
-  Image as ImageIcon, Share2
+  Image as ImageIcon, Share2, Tag
 } from 'lucide-react';
 import { GeoPoint, BaseLayerType } from '../types';
 import * as XLSX from 'xlsx';
 import { CATEGORY_MAP } from '../constants/mapConfig';
-import { analyzeRegionalData } from '../services/geminiService';
 
-const normalizeFacilityName = (name: string): string => {
+const cleanFacilityName = (name: string): string => {
   if (!name) return 'Unknown Facility';
   let n = name.toUpperCase().trim();
-  n = n.split(' - ')[0].trim();
-  // Aggressively remove project specific metadata
-  n = n.replace(/CONSTRUCTION OF|REPAIR OF|NEW CONSTRUCTION|PHASE \d+|PHASE|ADMIN BLDG|ADMIN BUILDING|MOTORPOOL/g, '').trim();
   
-  if (n.includes('INTEGRATED PROVINCIAL HEALTH OFFICE')) n = 'IPHO';
-  if (n.includes('CITY HEALTH OFFICE')) n = 'CHO';
-  if (n.includes('RURAL HEALTH UNIT')) n = 'RHU';
-  if (n.includes('BARANGAY HEALTH STATION')) n = 'BHS';
-  
-  if (n.includes('HOSPITAL')) {
-    // Remove hierarchy to find base facility identity
-    n = n.replace(/DISTRICT|MUNICIPAL|PROVINCIAL|MEMORIAL|LIPAE|CITY|REGIONAL/g, '');
-    n = n.replace(/\s+/g, ' ').trim();
-    if (!n.endsWith('HOSPITAL')) n += ' HOSPITAL';
+  if (n.includes('TAWI-TAWI PROVINCIAL HOSPITAL')) {
+    return 'DATU HALUN SAKILAN MEMORIAL HOSPITAL';
   }
+
+  n = n.split(' - ')[0].split(',')[0].split('(')[0].split('/')[0].trim();
   
-  if (n.includes('CHO') || n.includes('IPHO')) {
-    n = n.replace(/CITY|PROVINCIAL/g, '');
+  const noise = [
+    /CONSTRUCTION OF/g, /REPAIR OF/g, /NEW CONSTRUCTION/g, /EXPANSION OF/g, 
+    /EQUIPPING OF/g, /REPAIR\/RENOVATION/g, /PHASE \d+/g, /UPGRADE OF/g,
+    /REHABILITATION OF/g, /COMPLETION OF/g, /ESTABLISHMENT OF/g,
+    /INTEGRATED PROVINCIAL HEALTH OFFICE/g, /CITY HEALTH OFFICE/g,
+    /RURAL HEALTH UNIT/g, /BARANGAY HEALTH STATION/g
+  ];
+  noise.forEach(pattern => { n = n.replace(pattern, '').trim(); });
+
+  if (n.includes('HOSPITAL')) {
+    n = n.replace(/SR\.|JR\.|SENIOR|JUNIOR/g, '');
+    n = n.replace(/\b[A-Z]\.\s+/g, ' '); 
     n = n.replace(/\s+/g, ' ').trim();
   }
   
@@ -58,6 +58,8 @@ interface NavigationProps {
   setShowLabels: (v: boolean) => void;
   showBorders: boolean;
   setShowBorders: (v: boolean) => void;
+  showNameMarkers: boolean;
+  setShowNameMarkers: (v: boolean) => void;
   availableCategories: string[];
   selectedCategories: string[];
   setSelectedCategories: (cats: string[]) => void;
@@ -104,7 +106,7 @@ const AppNavigation: React.FC<NavigationProps> = (props) => {
       const appropValue = p.data?.Appropriation || p.data?.appropriation || '0';
       const approp = parseFloat(String(appropValue).replace(/,/g, ''));
       
-      const facilityBaseName = normalizeFacilityName(p.name);
+      const facilityBaseName = cleanFacilityName(p.name);
       const facilityFingerprint = `${facilityBaseName}|${p.category}|${mun}|${prov}`;
 
       if (!hierarchy[prov]) hierarchy[prov] = { muns: {}, count: 0, investment: 0 };
@@ -236,7 +238,7 @@ const AppNavigation: React.FC<NavigationProps> = (props) => {
   );
 };
 
-const TabContent = ({ tab, points, onUpload, hierarchyData, onClear, searchQuery, setSearchQuery, availableCategories, selectedCategories, setSelectedCategories, hiddenProvinces, onToggleProvince, onToggleAllProvinces, onFitActive, provincesInData, onProvinceSelect, onMunicipalitySelect, uploadFeedback, setUploadFeedback, highlightedProvince, highlightedMunicipality, showMarkers, setShowMarkers, showProvinces, setShowProvinces, showLabels, setShowLabels, showBorders, setShowBorders, onStartSnip, onCaptureFull, isCapturing, lastSnapUrl, onGenerateSnap, baseLayer, denominators, categoryTotals }: any) => {
+const TabContent = ({ tab, points, onUpload, hierarchyData, onClear, searchQuery, setSearchQuery, availableCategories, selectedCategories, setSelectedCategories, hiddenProvinces, onToggleProvince, onToggleAllProvinces, onFitActive, provincesInData, onProvinceSelect, onMunicipalitySelect, uploadFeedback, setUploadFeedback, highlightedProvince, highlightedMunicipality, showMarkers, setShowMarkers, showProvinces, setShowProvinces, showLabels, setShowLabels, showBorders, setShowBorders, showNameMarkers, setShowNameMarkers, onStartSnip, onCaptureFull, isCapturing, lastSnapUrl, onGenerateSnap, baseLayer, denominators, categoryTotals }: any) => {
     if (!tab) return null;
     const [expandedProv, setExpandedProv] = useState<string | null>(null);
     const [expandedMun, setExpandedMun] = useState<string | null>(null);
@@ -323,8 +325,9 @@ const TabContent = ({ tab, points, onUpload, hierarchyData, onClear, searchQuery
                            {[
                              { id: 'markers', label: 'Markers', val: showMarkers, set: setShowMarkers, icon: Box },
                              { id: 'provinces', label: 'Polygons', val: showProvinces, set: setShowProvinces, icon: Layers2 },
-                             { id: 'labels', label: 'Labels', val: showLabels, set: setShowLabels, icon: Type },
+                             { id: 'labels', label: 'Basemap', val: showLabels, set: setShowLabels, icon: Type },
                              { id: 'borders', label: 'Borders', val: showBorders, set: setShowBorders, icon: Square },
+                             { id: 'names', label: 'Names', val: showNameMarkers, set: setShowNameMarkers, icon: Tag },
                            ].map(ctrl => (
                              <button key={ctrl.id} onClick={() => ctrl.set(!ctrl.val)} className={`flex items-center gap-2 p-3 rounded-xl border text-[9px] font-black uppercase transition-all ${ctrl.val ? 'bg-indigo-600 text-white border-indigo-500 shadow-lg shadow-indigo-500/20' : `${isDarkBase ? 'bg-slate-800/40 border-slate-700 text-slate-500' : 'bg-slate-50 border-transparent text-slate-400'} opacity-60 hover:opacity-100 hover:bg-indigo-500/10`}`}>
                                 <ctrl.icon size={14} /> {ctrl.label}
@@ -414,12 +417,12 @@ const TabContent = ({ tab, points, onUpload, hierarchyData, onClear, searchQuery
                             
                             if (isHiddenBySolo) return null;
 
-                            const isCotabato = prov.toUpperCase().includes("COTABATO CITY");
+                            const isIndependentCity = prov.toUpperCase().includes("COTABATO CITY") || prov.toUpperCase().includes("MARAWI CITY");
                             const totalBrgysCount = Object.values(pData.muns).reduce((acc: number, m: any) => acc + Object.keys(m.brgys).length, 0);
                             const totalMunsCount = Object.keys(pData.muns).length;
                             
-                            const subCount = isCotabato ? totalBrgysCount : totalMunsCount;
-                            const unitLabel = isCotabato ? "BARANGAY" : "MUNICIPALITY";
+                            const subCount = isIndependentCity ? totalBrgysCount : totalMunsCount;
+                            const unitLabel = isIndependentCity ? "BARANGAY" : "MUNICIPALITY";
                             const formattedLabel = `${prov} (${subCount} ${unitLabel})`;
 
                             return (
